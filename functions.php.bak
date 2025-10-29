@@ -1,0 +1,386 @@
+<?php
+if ( ! defined( 'ABSPATH' ) ) exit;
+
+/**
+ * Mini Shop Complete - Enhanced functions
+ */
+
+// Enqueue compiled CSS and main JS
+function msc_enqueue_assets() {
+    wp_enqueue_style( 'msc-tailwind', get_template_directory_uri() . '/assets/css/main.css', array(), '1.0' );
+    wp_enqueue_script( 'msc-main', get_template_directory_uri() . '/assets/js/main.js', array('jquery'), '1.0', true );
+
+    wp_localize_script( 'msc-main', 'mscData', array(
+        'ajax_url' => admin_url('admin-ajax.php'),
+        'nonce'    => wp_create_nonce('msc_mailchimp_nonce'),
+    ));
+}
+add_action( 'wp_enqueue_scripts', 'msc_enqueue_assets' );
+
+// Theme supports and menus
+function msc_theme_setup() {
+    add_theme_support( 'title-tag' );
+    add_theme_support( 'post-thumbnails' );
+    add_theme_support( 'html5', array( 'search-form', 'gallery', 'caption' ) );
+    add_theme_support( 'woocommerce' );
+    register_nav_menus( array(
+        'primary-menu' => __( 'Primary Menu', 'mini-shop-complete' ),
+    ));
+}
+add_action( 'after_setup_theme', 'msc_theme_setup' );
+
+// Footer widget areas
+function msc_register_widgets() {
+    register_sidebar(array(
+        'name' => 'Footer Column 1',
+        'id' => 'footer-1',
+        'before_widget' => '<div class="footer-widget">',
+        'after_widget' => '</div>',
+    ));
+    register_sidebar(array(
+        'name' => 'Footer Column 2',
+        'id' => 'footer-2',
+    ));
+    register_sidebar(array(
+        'name' => 'Footer Column 3',
+        'id' => 'footer-3',
+    ));
+}
+add_action('widgets_init','msc_register_widgets');
+
+/* -------------------------
+   Theme Options (Settings page)
+   ------------------------- */
+function msc_settings_page() {
+    add_options_page(
+        'MiniShop Options',
+        'MiniShop Options',
+        'manage_options',
+        'msc-options',
+        'msc_render_settings_page'
+    );
+}
+add_action('admin_menu','msc_settings_page');
+
+function msc_render_settings_page(){
+    if ( ! current_user_can('manage_options') ) return;
+    if ( isset($_POST['msc_save_options']) && check_admin_referer('msc_options_save','msc_options_nonce') ) {
+        update_option('msc_mailchimp_api_key', sanitize_text_field($_POST['msc_mailchimp_api_key']));
+        update_option('msc_mailchimp_list_id', sanitize_text_field($_POST['msc_mailchimp_list_id']));
+        echo '<div class="updated"><p>Settings saved.</p></div>';
+    }
+    $api = esc_attr(get_option('msc_mailchimp_api_key',''));
+    $list = esc_attr(get_option('msc_mailchimp_list_id',''));
+    ?>
+    <div class="wrap">
+        <h1>MiniShop Options</h1>
+        <form method="post">
+            <?php wp_nonce_field('msc_options_save','msc_options_nonce'); ?>
+            <table class="form-table">
+                <tr valign="top">
+                    <th scope="row">Mailchimp API Key</th>
+                    <td><input type="text" name="msc_mailchimp_api_key" value="<?php echo $api; ?>" class="regular-text" /></td>
+                </tr>
+                <tr valign="top">
+                    <th scope="row">Mailchimp List ID</th>
+                    <td><input type="text" name="msc_mailchimp_list_id" value="<?php echo $list; ?>" class="regular-text" /><p class="description">Your Mailchimp audience (list) ID.</p></td>
+                </tr>
+            </table>
+            <p class="submit"><input type="submit" name="msc_save_options" class="button button-primary" value="Save Changes"></p>
+        </form>
+    </div>
+    <?php
+}
+
+/* Admin notice if Mailchimp keys not set */
+function msc_admin_notice_mailchimp(){
+    if ( ! current_user_can('manage_options') ) return;
+    $screen = get_current_screen();
+    // Only show on dashboard and theme page, not on settings page to avoid noise
+    if ( get_option('msc_mailchimp_api_key','') == '' || get_option('msc_mailchimp_list_id','') == '' ) {
+        echo '<div class="notice notice-warning is-dismissible"><p><strong>MiniShop:</strong> Mailchimp API Key and/or List ID not set. Visit <a href="'.admin_url('options-general.php?page=msc-options').'">MiniShop Options</a> to configure.</p></div>';
+    }
+}
+add_action('admin_notices','msc_admin_notice_mailchimp');
+
+/* Mailchimp subscribe helper reads from Options page */
+function msc_mailchimp_subscribe( $email ) {
+    $api_key = get_option('msc_mailchimp_api_key','');
+    $list_id = get_option('msc_mailchimp_list_id','');
+
+    if ( empty($api_key) || empty($list_id) ) {
+        return new WP_Error('no_api', 'Mailchimp API key or List ID not set.');
+    }
+    if ( strpos($api_key, '-') === false ) {
+        return new WP_Error('invalid_key', 'Invalid Mailchimp API key format.');
+    }
+    list(, $dc) = explode('-', $api_key, 2);
+    $url = sprintf('https://%s.api.mailchimp.com/3.0/lists/%s/members/', $dc, $list_id);
+
+    $body = array(
+        'email_address' => $email,
+        'status' => 'subscribed'
+    );
+
+    $response = wp_remote_post( $url, array(
+        'headers' => array(
+            'Authorization' => 'apikey ' . $api_key,
+            'Content-Type' => 'application/json'
+        ),
+        'body' => wp_json_encode( $body ),
+        'timeout' => 15,
+    ));
+
+    if ( is_wp_error( $response ) ) {
+        return $response;
+    }
+
+    $code = wp_remote_retrieve_response_code( $response );
+    $resp_body = wp_remote_retrieve_body( $response );
+
+    if ( $code == 200 || $code == 201 ) {
+        return true;
+    } else {
+        return new WP_Error('mc_error', 'Mailchimp error: ' . $resp_body);
+    }
+}
+
+/* Fallback mock subscribe (frontend direct to jsonplaceholder) */
+function msc_mock_subscribe( $email ) {
+    $response = wp_remote_post('https://jsonplaceholder.typicode.com/posts', array(
+        'headers'=>array('Content-Type'=>'application/json'),
+        'body' => wp_json_encode(array('email'=>$email)),
+        'timeout'=>10,
+    ));
+    if ( is_wp_error($response) ) return $response;
+    $code = wp_remote_retrieve_response_code($response);
+    if ( $code >= 200 && $code < 300 ) return true;
+    return new WP_Error('mock_error','Mock API failed');
+}
+
+/* AJAX handler chooses Mailchimp when keys exist, otherwise mock */
+function msc_ajax_mailchimp_signup() {
+    check_ajax_referer( 'msc_mailchimp_nonce', 'nonce' );
+
+    $email = isset($_POST['email']) ? sanitize_email($_POST['email']) : '';
+    if ( empty($email) || ! is_email($email) ) {
+        wp_send_json_error(array('message' => 'Invalid email'), 400);
+    }
+
+    // Try Mailchimp first
+    if ( get_option('msc_mailchimp_api_key','') != '' && get_option('msc_mailchimp_list_id','') != '' ) {
+        $res = msc_mailchimp_subscribe($email);
+    } else {
+        $res = msc_mock_subscribe($email);
+    }
+
+    if ( is_wp_error($res) ) {
+        wp_send_json_error(array('message' => $res->get_error_message()), 500);
+    } else {
+        wp_send_json_success(array('message' => 'Subscribed successfully!'));
+    }
+}
+add_action('wp_ajax_msc_mailchimp_signup','msc_ajax_mailchimp_signup');
+add_action('wp_ajax_nopriv_msc_mailchimp_signup','msc_ajax_mailchimp_signup');
+
+/**
+ * Create pages, menu, demo products and add placeholder images on theme activation
+ */
+function msc_create_pages_products_menu() {
+
+    // Pages with rich content
+    $pages = array(
+        'Home' => array('slug'=>'home','content'=> '<h2 class="text-2xl font-bold">Premium Products for Everyday Comfort</h2><p class="mt-4">Explore our latest tech and accessories designed to bring ease into your lifestyle.</p><a class="inline-block mt-4 bg-blue-600 text-white px-4 py-2 rounded" href="'.home_url('/shop').'">Start Shopping</a>'),
+        'About' => array('slug'=>'about','content'=>'<h2>About MyShop</h2><p>MyShop is a dedicated e-commerce brand bringing premium-quality products at fair prices.</p>'),
+        'Contact' => array('slug'=>'contact','content'=>'<h2>Contact Us</h2><p>Email: support@myshop.com</p><p>Phone: +1 234 567 890</p><p>Use the contact form on this page.</p>'),
+        'Thank You' => array('slug'=>'thank-you','content'=>'<h2>Thank You!</h2><p>Your message has been received.</p>')
+    );
+
+    $created_page_ids = array();
+
+    foreach ( $pages as $title => $data ) {
+        if ( ! get_page_by_title( $title ) ) {
+            $page_id = wp_insert_post( array(
+                'post_title' => $title,
+                'post_name'  => $data['slug'],
+                'post_content' => $data['content'],
+                'post_status'=> 'publish',
+                'post_type'  => 'page'
+            ));
+            if ( $title === 'Home' ) {
+                update_option('page_on_front',$page_id);
+                update_option('show_on_front','page');
+            }
+            $created_page_ids[$title] = $page_id;
+        } else {
+            $existing = get_page_by_title($title);
+            $created_page_ids[$title] = $existing->ID;
+        }
+    }
+
+    // Create primary menu and add pages
+    if ( ! wp_get_nav_menu_object('Primary Menu') ) {
+        $menu_id = wp_create_nav_menu('Primary Menu');
+        // assign menu to theme location
+        $locations = get_theme_mod('nav_menu_locations');
+        $locations['primary-menu'] = $menu_id;
+        set_theme_mod('nav_menu_locations', $locations);
+
+        // add pages to menu
+        foreach ( $created_page_ids as $title => $pid ) {
+            wp_update_nav_menu_item($menu_id, 0, array(
+                'menu-item-title' => $title,
+                'menu-item-object-id' => $pid,
+                'menu-item-object' => 'page',
+                'menu-item-type' => 'post_type',
+                'menu-item-status' => 'publish'
+            ));
+        }
+    }
+
+    // Create shop page if WooCommerce active
+    if ( class_exists('WooCommerce') ) {
+        if ( ! get_page_by_title('Shop') ) {
+            $shop_id = wp_insert_post(array(
+                'post_title' => 'Shop',
+                'post_name'  => 'shop',
+                'post_content' => '<h2>Shop Latest Arrivals</h2><p>Explore quality products selected just for you.</p>',
+                'post_status' => 'publish',
+                'post_type' => 'page'
+            ));
+            update_option('woocommerce_shop_page_id', $shop_id);
+        }
+    }
+
+    // Create demo products and attach placeholder images
+    if ( class_exists('WooCommerce') ) {
+        $existing = wc_get_products(array('limit'=>1));
+        if ( empty($existing) ) {
+            $demo_products = array(
+                array(
+                    'title'=>'Classic Leather Wallet',
+                    'price'=>45,
+                    'short'=>'A premium handcrafted wallet designed for everyday convenience and durability.',
+                    'long'=>'The Classic Leather Wallet is crafted from high-grade full-grain leather with multiple card slots and a compact design.',
+                    'acf' => array('product_material'=>'Full-grain cowhide leather','product_shipping_note'=>'Ships within 2–3 business days'),
+                    'image' => 'assets/images/wallet.svg'
+                ),
+                array(
+                    'title'=>'Stainless Steel Water Bottle',
+                    'price'=>29,
+                    'short'=>'Durable, insulated water bottle suitable for any adventure.',
+                    'long'=>'Double-wall insulation keeps beverages cold for up to 24 hours or hot for up to 12 hours.',
+                    'acf' => array('product_material'=>'Food-grade stainless steel','product_shipping_note'=>'Eco-friendly packaging included'),
+                    'image' => 'assets/images/bottle.svg'
+                ),
+                array(
+                    'title'=>'Wireless Bluetooth Earbuds',
+                    'price'=>79,
+                    'short'=>'Crisp, clear audio with compact wireless earbuds made for comfort.',
+                    'long'=>'High-quality sound with noise reduction and up to 20 hours playback with charging case.',
+                    'acf' => array('product_material'=>'ABS plastic and silicone','product_shipping_note'=>'Free delivery and 7-day return policy'),
+                    'image' => 'assets/images/earbuds.svg'
+                ),
+            );
+
+            foreach ( $demo_products as $p ) {
+                $post_id = wp_insert_post( array(
+                    'post_title' => $p['title'],
+                    'post_content' => $p['long'],
+                    'post_excerpt' => $p['short'],
+                    'post_status' => 'publish',
+                    'post_type' => 'product',
+                ));
+                // Set price
+                update_post_meta( $post_id, '_regular_price', $p['price'] );
+                update_post_meta( $post_id, '_price', $p['price'] );
+                update_post_meta( $post_id, '_stock_status', 'instock' );
+
+                // Set ACF fields if ACF present
+                if ( function_exists('update_field') ) {
+                    if ( isset($p['acf']) ) {
+                        foreach ( $p['acf'] as $key => $val ) {
+                            update_field( $key, $val, $post_id );
+                        }
+                    }
+                } else {
+                    if ( isset($p['acf']) ) {
+                        foreach ( $p['acf'] as $key => $val ) {
+                            update_post_meta( $post_id, $key, $val );
+                        }
+                    }
+                }
+
+                // Attach placeholder image from theme to product
+                $theme_file = get_stylesheet_directory() . '/' . $p['image'];
+                if ( file_exists( $theme_file ) ) {
+                    require_once( ABSPATH . 'wp-admin/includes/file.php' );
+                    require_once( ABSPATH . 'wp-admin/includes/media.php' );
+                    require_once( ABSPATH . 'wp-admin/includes/image.php' );
+
+                    $upload = wp_upload_bits( basename( $theme_file ), null, file_get_contents( $theme_file ) );
+                    if ( ! $upload['error'] ) {
+                        $wp_filetype = wp_check_filetype( $upload['file'], null );
+                        $attachment = array(
+                            'post_mime_type' => $wp_filetype['type'],
+                            'post_title' => sanitize_file_name( basename( $upload['file'] ) ),
+                            'post_content' => '',
+                            'post_status' => 'inherit'
+                        );
+                        $attach_id = wp_insert_attachment( $attachment, $upload['file'], $post_id );
+                        $attach_data = wp_generate_attachment_metadata( $attach_id, $upload['file'] );
+                        wp_update_attachment_metadata( $attach_id, $attach_data );
+                        set_post_thumbnail( $post_id, $attach_id );
+                    }
+                }
+            }
+        }
+    }
+}
+add_action('after_switch_theme','msc_create_pages_products_menu');
+
+
+/**
+ * Programmatically register ACF field group if ACF is active
+ */
+function msc_register_acf_fields() {
+    if ( function_exists('acf_add_local_field_group') ) {
+        acf_add_local_field_group(array(
+            'key' => 'group_product_extras',
+            'title' => 'Product Extras',
+            'fields' => array(
+                array(
+                    'key' => 'field_product_material',
+                    'label' => 'Product Material',
+                    'name' => 'product_material',
+                    'type' => 'text',
+                ),
+                array(
+                    'key' => 'field_shipping_note',
+                    'label' => 'Product Shipping Note',
+                    'name' => 'product_shipping_note',
+                    'type' => 'textarea',
+                ),
+            ),
+            'location' => array(
+                array(
+                    array(
+                        'param' => 'post_type',
+                        'operator' => '==',
+                        'value' => 'product',
+                    ),
+                ),
+            ),
+        ));
+    }
+}
+add_action('acf/init','msc_register_acf_fields');
+
+/**
+ * Simple security headers
+ */
+function msc_security_headers() {
+    header("X-Frame-Options: SAMEORIGIN");
+    header("X-Content-Type-Options: nosniff");
+}
+add_action('send_headers','msc_security_headers');
