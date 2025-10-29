@@ -21,7 +21,6 @@ This theme is a lightweight custom WooCommerce-ready WordPress theme prepared fo
 - Mailchimp requires a valid API key (format: key-dc, e.g. xxxxx-us5) and a list/audience ID.
 - ACF fields are registered programmatically only if ACF is active.
 
-
 ## Updates
 - Added Settings -> MiniShop Options to store Mailchimp API key and List ID.
 - Auto-created 'Primary Menu' and assigned default pages.
